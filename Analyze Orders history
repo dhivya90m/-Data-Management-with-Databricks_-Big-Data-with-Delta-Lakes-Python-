@@ -1,0 +1,183 @@
+TASK 2 - Upload project JSON files to Databricks file system
+## Load Data Using the UI to this path dbfs:/FileStore/SupplyChain/ORDERS_RAW/
+
+# Use Databricks Utilities (dbutils). 
+
+dbutils.fs.ls("dbfs:/FileStore/SupplyChain/ORDERS_RAW/")
+
+TASK 3 - Create Delta Table : ORDERS_RAW
+# Read multiple line json files using spark dataframeAPI
+
+
+orders_raw_df = spark.read.option("multiline","true").json("dbfs:/FileStore/SupplyChain/ORDERS_RAW/ORDERS_RAW_PART_*.json")
+
+## Show the datafarme
+orders_raw_df.show(n=5, truncate=False) 
+
+## click on orders_raw_df to Check the schema
+
+#Validate loaded files Count Number of Rows in the DataFrame, the total Should be "1510"
+orders_raw_df.count()
+
+# First, Create Database SupplyChainDB if it doesn't exist
+db = "SupplyChainDB"
+
+spark.sql(f"CREATE DATABASE IF NOT EXISTS {db}")
+spark.sql(f"USE {db}")
+
+## Create DeltaTable ORDERS_RAW in the metastore using DataFrame's schema and write data to it
+
+orders_raw_df.write.mode("overwrite").format("delta").option("overwriteSchema","true").saveAsTable("ORDERS_RAW")
+
+%sql
+-- Switch to SQL Cell using %SQL
+SHOW tables
+  -- Alternativerly you can use Python: display(spark.sql(f"SHOW TABLES"))
+
+%sql
+SELECT count(*) from orders_raw
+
+%sql
+
+describe DETAIL ORDERS_RAW
+
+-- Returns the basic metadata information of a delta table.
+Create INVENTORY Delta table
+## Load the file using the UI to this path dbfs:/FileStore/SupplyChain/INVENTORY/
+
+inventory_df = spark.read.option("multiline","true").json("dbfs:/FileStore/SupplyChain/INVENTORY")
+
+## Show the datafarme
+inventory_df.show(n=5, truncate=False)
+
+# First, Create Database SupplyChainDB
+db = "SupplyChainDB"
+spark.sql(f"USE {db}")
+
+## Create INVENTORY Delta Table 
+inventory_df.write.mode("overwrite").format("delta").option("overwriteSchema","true").saveAsTable("INVENTORY")
+
+%sql
+-- Switch to SQL Cell using %sql
+SHOW TABLES
+
+TASK 4 - Transform data in delta table
+#read Delta Table using spark dataframe
+
+ORDERS_Gold_df= spark.read.table("SupplyChaindb.ORDERS_RAW") 
+
+ORDERS_Gold_df.show(n=5,truncate=False)
+# Click on ORDERS_DF to See the Schema of the Table. 
+
+#Use withColumn method & to_date()
+# withColumn Documentation : https://spark.apache.org/docs/3.1.3/api/python/reference/api/pyspark.sql.DataFrame.withColumn.html
+# TO_DATE() Documentation : https://docs.databricks.com/sql/language-manual/functions/to_date.html
+
+from pyspark.sql.functions import *
+
+
+ORDERS_Gold_df =  ORDERS_Gold_df.withColumn("ORDER_DATE",to_date(col("ORDER_DATE"),"yyyy-MM-dd"))
+
+# Count Nulls for each column
+from pyspark.sql.functions import *
+
+display(ORDERS_Gold_df.select([count(when(col(c).isNull(),c)).alias(c) for c in ORDERS_Gold_df.columns]))
+
+#  Remove Nulls using dropna() method which removes all rows with Null Values 
+
+ORDERS_Gold_df = ORDERS_Gold_df.dropna()
+
+ORDERS_Gold_df.count()
+
+#Use withColumn function
+ORDERS_Gold_df = ORDERS_Gold_df.withColumn("TOTAL_ORDER",col("QUANTITY")*col("UNIT_PRICE"))
+
+
+# Display ORDERS_Gold_df to validate the creation of the New Column TOTAL_ORDER
+display(ORDERS_Gold_df)
+
+# Make sure you are using SupplyChainDB
+spark.sql(f"USE SupplyChainDB")
+
+## Create DeltaTable Orders_GOLD: 
+
+ORDERS_Gold_df.write.mode("overwrite").format("delta").saveAsTable("ORDERS_GOLD")
+
+display(spark.sql(f"SHOW TABLES"))
+
+
+## Validate that the table was created successfully
+display(spark.sql(f"SHOW TABLES"))
+
+TASK 5 - Query Orders Delta table using SQL
+%sql
+-- Get top 30 rows Get Familiar with the Data
+
+select * from supplychaindb.orders_gold limit 30
+%sql
+-- Division = CATEGORY 
+-- Dont forget to Filter out Cancelled Orders
+
+select ORDER_COUNTRY, sum(QUANTITY) as TOTAL_DEMAND from supplychaindb.orders_gold where ORDER_STATUS != "Cancelled" group by ORDER_COUNTRY
+%sql
+-- Dont forget to Filter out Cancelled Orders
+
+select CATEGORY, SUM(TOTAL_ORDER) as Revenue from supplychaindb.orders_gold where ORDER_STATUS != "Cancelled" group by CATEGORY order by Revenue DESC
+%sql
+-- Limit Result to 5 and Order Results and order by Sold Quanity
+
+select BRAND, SUM(QUANTITY) as TOTAL_SOLD_ITEMS from supplychaindb.orders_gold group by BRAND order by TOTAL_SOLD_ITEMS desc limit 5
+
+TASK 6 - Create Dashboard
+
+
+KPI-4: Monthly Sales Trend (In QTY)
+%sql
+-- Use DATE_TRUNC()  
+
+select date_trunc('MONTH', ORDER_DATE) AS MONTH_SAL, SUM(QUANTITY) as MONTHLY_QUANTITY from supplychaindb.orders_gold where ORDER_STATUS != "Cancelled" group by 1 order by 1 asc
+TASK 7 - Update Data in Orders table using Merge
+# Read multiple line json file UPDATE_ORDERS_RAW.json
+Update_orders_df = spark.read.option("multiline","true").json("dbfs:/FileStore/SupplyChain/ORDERS_RAW/UPDATE_ORDERS_RAW.json")
+
+## Show the datafarme
+display(Update_orders_df)
+-->Check the original data BEFORE MERGE
+%sql 
+select ORDER_ID,ORDER_STATUS,Quantity from Supplychaindb.ORDERS_RAW WHERE ORDER_ID in ("ORD-1281","ORD-829","ORD-193","ORD-826","ORD-842")
+
+%sql
+DESCRIBE DETAIL supplychaindb.ORDERS_RAW
+from delta.tables import *
+
+# programmatically interacting with Delta tables using the class delta.tables.DeltaTable(spark: pyspark.sql.session.SparkSession, jdt: JavaObject)
+delta_orders_raw =  DeltaTable.forPath(spark,"dbfs:/user/hive/warehouse/supplychaindb.db/orders_raw")
+
+## merge data into delta Table ORDER_RAW
+# DOCUMENTATION https://docs.delta.io/latest/delta-update.html#language-python 
+
+delta_orders_raw.alias("ORDER_RAW").merge(Update_orders_df.alias("Update_Orders"), "ORDER_RAW.ORDER_ID = Update_orders.order_ID")\
+  .whenMatchedUpdateAll()\
+   .whenNotMatchedInsertAll()\
+     .execute() 
+
+# must be at least one WHEN clause in a MERGE statement.
+
+
+--> check the udaptes rows AFTER MERGE
+%sql 
+select ORDER_ID,ORDER_STATUS,Quantity from SUPPLYCHAINDB.ORDERS_RAW WHERE ORDER_ID in ("ORD-1281","ORD-829","ORD-193","ORD-826","ORD-842")
+
+TASK 8 - Query previous versions of delta table using Time Travel
+%sql
+-- Check Table History 
+DESCRIBE HISTORY supplychaindb.ORDERS_RAW
+-- Use the UI to see Delta Table History
+%sql 
+ select ORDER_ID,ORDER_STATUS,Quantity from SUPPLYCHAINDB.ORDERS_RAW VERSION AS OF 0 WHERE ORDER_ID in ("ORD-1281","ORD-829","ORD-193","ORD-826","ORD-842")
+
+-- CHange Version Number to See different Versions of the delta table
+#Time Travel
+version_1 = spark.read.format('delta').option('TimeStamp', "2023-05-16").table("SUPPLYCHAINDB.ORDERS_RAW")
+display(version_1)
+  
